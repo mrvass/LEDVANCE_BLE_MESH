@@ -486,7 +486,7 @@ void ble_mesh_send_hsl_set(uint16_t hue, uint16_t saturation, uint16_t addr)
         return;
     }
 
-    ESP_LOGI(TAG, "Sending Lightness Set: hue=%d, sat=%d, addr=0x%04X, net_idx=0x%04x, app_idx=0x%04x",
+    ESP_LOGI(TAG, "Sending hsl Set: hue=%d, sat=%d, addr=0x%04X, net_idx=0x%04x, app_idx=0x%04x",
              hue, saturation, addr, app_state.net_idx, app_state.app_idx);
 
     common.opcode = ESP_BLE_MESH_MODEL_OP_LIGHT_HSL_SET_UNACK;
@@ -548,7 +548,7 @@ static char *create_ha_discovery_payload(const char *lamp_name, const char *base
     cJSON_AddStringToObject(root, "schema", "json");
     cJSON_AddTrueToObject(root, "brightness");
     cJSON_AddNumberToObject(root, "bri_scl", 50);
-    cJSON_AddStringToObject(root,"sup_clrm","hs");
+    cJSON_AddStringToObject(root,"sup_clrm","rgb");
     
     cJSON_AddStringToObject(root, "uniq_id", unique_id);
 
@@ -623,6 +623,9 @@ static void handle_lamp_command(esp_mqtt_event_handle_t event)
     const cJSON *temp = cJSON_GetObjectItemCaseSensitive(json, "color");
     const cJSON *hue = cJSON_GetObjectItemCaseSensitive(temp, "h");
     const cJSON *sat = cJSON_GetObjectItemCaseSensitive(temp, "s");
+    const cJSON *rjson = cJSON_GetObjectItemCaseSensitive(temp, "r");
+    const cJSON *gjson = cJSON_GetObjectItemCaseSensitive(temp, "g");
+    const cJSON *bjson = cJSON_GetObjectItemCaseSensitive(temp, "b");
 
     // Prioritize brightness command, as it implies the light should be on.
     if(cJSON_IsNumber(hue) && cJSON_IsNumber(sat))
@@ -633,6 +636,63 @@ static void handle_lamp_command(esp_mqtt_event_handle_t event)
         uint16_t sat16 = (uint16_t)satnum;
         ble_mesh_send_hsl_set(hue16,sat16,addr);
         snprintf(state_payload, sizeof(state_payload), "{\"state\":\"ON\", \"color\":{\"h\":%d,\"s\"%d}:}", hue16,sat16);
+        esp_mqtt_client_publish(mqtt_client, state_topic, state_payload, 0, 0, false);
+
+    }
+    else if(cJSON_IsNumber(rjson) && cJSON_IsNumber(gjson) && cJSON_IsNumber(bjson))
+    {
+        int ri = (float)rjson->valueint;
+        int gi = (float)gjson->valueint;
+        int bi = (float)bjson->valueint;
+        float r = ((float)ri)/255;
+        float g = ((float)gi)/255;
+        float b = ((float)bi)/255;
+        float min = r;
+        float max = r;
+        if(g < min) min = g;
+        if(b < min) min = b;
+        if(g > max) max = g;
+        if(b > max) max = b;
+        float h=0;
+        float s=0;
+        float l = (max+min)/2;
+        if(max != min)
+        {
+            if(l > 0.5)
+            {
+                s = (max-min)/(2-max-min);
+            }            
+            else
+            {
+                s = (max-min)/(max+min);
+            }
+            if(r == max)
+            {
+                h = (g-b)/(max-min);
+                if(g < b) h += 6;
+            }
+            else if(g == max)
+            {
+                h = (b-r)/(max-min)+2;
+            }
+            else if(b == max)
+            {
+                h = (r-g)/(max-min)+4;
+            }
+            h /= 6;
+        }
+        uint16_t hue16 = (uint16_t)(h*360);
+        uint16_t sat16 = (uint16_t)(s*100);
+        uint16_t lightness = (uint16_t)(l*100);
+
+        ESP_LOGI(TAG, "rgb %d %d %d ==> hsl %d %d %d (addr 0x%04X)", ri,gi,bi,hue16,sat16,lightness, addr);
+
+        ble_mesh_send_hsl_set(hue16,sat16,addr);
+        snprintf(state_payload, sizeof(state_payload), "{\"state\":\"ON\", \"color\":{\"r\":%d,\"g\"%d,\"b\"%d}:}", ri,gi,bi);
+        esp_mqtt_client_publish(mqtt_client, state_topic, state_payload, 0, 0, false);
+
+        ble_mesh_send_lightness_set(lightness, addr);
+        snprintf(state_payload, sizeof(state_payload), "{\"state\":\"ON\", \"brightness\":%d}", lightness);
         esp_mqtt_client_publish(mqtt_client, state_topic, state_payload, 0, 0, false);
 
     }
